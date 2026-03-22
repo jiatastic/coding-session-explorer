@@ -1,0 +1,42 @@
+[project]
+name = "coding-session-explorer"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlmodel>=0.0.21",
+    "chromadb>=0.5",
+    "openai>=1.40",
+    "sentence-transformers>=3.0",
+    "watchdog>=4.0",
+    "pydantic>=2.7",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "pyright"]
+
+[project.scripts]
+sess = "cli.main:app"
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "cli*", "server*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
