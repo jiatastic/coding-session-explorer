@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0-rc.3.json",
+  "productName": "Coding Session Explorer",
+  "version": "0.1.0",
+  "identifier": "com.coding-session-explorer.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../.next"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Coding Session Explorer",
+        "width": 1280,
+        "height": 840
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": ["../../bin/sess"]
+  },
+  "plugins": {}
+}

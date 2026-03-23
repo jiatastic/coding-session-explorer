@@ -53,6 +53,18 @@ sess watch                        # background file watcher
 sess serve                        # start FastAPI server (used by desktop app)
 ```
 
+## Current Verification Status
+
+- ✅ `pytest tests/test_crawlers.py`
+- ✅ `pytest tests/test_indexing_and_search.py`
+- ✅ `pytest tests`
+- ✅ `pyproject.toml` now uses `setuptools.build_meta`, allowing `uv sync --extra dev` and `uv run` verification flows.
+- ✅ `ruff check core cli server tests` clean (after auto-format/import/order fixes)
+- ✅ `pyright` clean when run via `uv run pyright` with `uv sync --extra dev` environment
+- ✅ Manual `indexer` and crawler regression scenario now passes with isolated HOME fixture data and does not double-count stale sessions.
+- ✅ `desktop` package install/build/lint passes (`npm run build`, `npm run lint`) after `next.config.ts` migration and ESLint setup.
+- ✅ `cargo` + `tauri-cli` installed and `cargo tauri build` completes successfully (macOS, aarch64), with a placeholder session-sidecar binary present at `bin/sess-aarch64-apple-darwin` for local verification.
+
 ## Architecture
 
 ```
@@ -74,7 +86,7 @@ sess serve                        # start FastAPI server (used by desktop app)
 ## Stack
 
 - **Core / CLI**: Python 3.12, Typer, Rich, SQLModel, ChromaDB, watchdog
-- **Embeddings**: OpenAI `text-embedding-3-small` (swap in `sentence-transformers` for fully offline)
+- **Embeddings**: OpenAI `text-embedding-3-small` when `openai_api_key` is set in `~/.coding-sessions/config.toml`; otherwise local `sentence-transformers` (fully offline)
 - **Server**: FastAPI + Uvicorn
 - **Desktop**: Tauri v2 (Rust) + React 18 + Tailwind CSS + shadcn/ui
 

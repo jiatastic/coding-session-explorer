@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+
+echo "sess sidecar placeholder not intended for production runs"
+exit 0

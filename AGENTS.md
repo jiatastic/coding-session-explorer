@@ -302,7 +302,7 @@ Use `updated_at` to detect whether a session needs re-embedding (compare file mt
 In `core/embedder.py`:
 
 - Use `openai.embeddings.create(model="text-embedding-3-small", input=[...])` in batches of 100
-- Fall back to `sentence_transformers.SentenceTransformer("all-MiniLM-L6-v2")` if `OPENAI_API_KEY` is not set
+- Fall back to `sentence_transformers.SentenceTransformer("all-MiniLM-L6-v2")` if no OpenAI key is set in `~/.coding-sessions/config.toml` (`[embedding]` → `openai_api_key` or `api_key`)
 - ChromaDB collection name: `"messages"`
 - Document ID: `message.id`
 - Document text: `message.content`
@@ -493,6 +493,7 @@ In `src-tauri/src/main.rs`, spawn the sidecar on app ready and store the child p
 provider = "openai"           # "openai" | "local"
 model = "text-embedding-3-small"
 batch_size = 100
+# openai_api_key = "sk-..."   # optional; omit to use local embeddings only
 
 [sources]
 claude = true
@@ -504,7 +505,7 @@ port = 8000
 host = "127.0.0.1"
 ```
 
-Read with `tomllib` (stdlib in Python 3.11+). Respect `OPENAI_API_KEY` env var.
+Read with `tomllib` (stdlib in Python 3.11+). Do not use repo-root `.env` files; secrets stay under `~/.coding-sessions/` only.
 
 ---
 

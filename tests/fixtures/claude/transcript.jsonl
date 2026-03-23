@@ -1,0 +1,4 @@
+{"type":"summary","summary":"Claude auth troubleshooting"}
+{"type":"user","timestamp":"2026-03-21T10:00:00.000Z","content":"How can I reset my local cache?"}
+{"type":"assistant","timestamp":"2026-03-21T10:01:00.000Z","content":"Run the CLI clear command and restart."}
+{"type":"assistant","timestamp":"2026-03-21T10:02:00.000Z","content":"It should fix stale auth tokens."}
