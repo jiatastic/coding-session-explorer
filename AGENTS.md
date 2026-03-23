@@ -77,32 +77,11 @@ coding-session-explorer/
 │   └── display.py         # Rich rendering helpers
 ├── server/
 │   ├── __init__.py
-│   └── main.py            # FastAPI app (used as Tauri sidecar)
-├── desktop/
-│   ├── src-tauri/
-│   │   ├── Cargo.toml
-│   │   ├── tauri.conf.json
-│   │   └── src/
-│   │       └── main.rs
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── layout.tsx
-│   │   │   ├── page.tsx         # Dashboard + heatmap
-│   │   │   ├── sessions/
-│   │   │   │   ├── page.tsx     # Session list
-│   │   │   │   └── [id]/
-│   │   │   │       └── page.tsx # Session detail / conversation viewer
-│   │   │   └── search/
-│   │   │       └── page.tsx     # Semantic search
-│   │   └── components/
-│   │       ├── HeatMap.tsx
-│   │       ├── SessionCard.tsx
-│   │       ├── MessageViewer.tsx
-│   │       └── SearchResult.tsx
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── tailwind.config.ts
-│   └── next.config.ts
+│   └── main.py            # FastAPI JSON API (TUI + optional tools)
+├── tui/
+│   ├── package.json       # Bun + @opentui/core
+│   ├── index.ts           # OpenTUI entry (sessions list, search, detail)
+│   └── tsconfig.json
 ├── pyproject.toml
 ├── .gitignore
 ├── README.md
@@ -267,31 +246,9 @@ class BaseCrawler(ABC):
 
 ## 5. Indexer
 
-Create `core/indexer.py`:
+`core/indexer.py` runs **one enabled crawler per thread** (`ThreadPoolExecutor`): Claude / Codex / Cursor `discover()` in parallel, each worker walks its file list independently. **SQLite + Chroma writes are serialized** via `core/indexing_lock.writer_lock` (WAL + `busy_timeout` on connections) so parallel parse + embed stays safe.
 
-```python
-def index_all(force: bool = False) -> dict:
-    """Run all crawlers, upsert into SQLite, generate embeddings for new messages."""
-    from core.crawlers.claude import ClaudeCrawler
-    from core.crawlers.codex import CodexCrawler
-    from core.crawlers.cursor import CursorCrawler
-
-    crawlers = [ClaudeCrawler(), CodexCrawler(), CursorCrawler()]
-    stats = {"new_sessions": 0, "new_messages": 0, "skipped": 0}
-
-    for crawler in crawlers:
-        sessions = crawler.crawl_all()
-        for session in sessions:
-            upserted = db.upsert_session(session)
-            if upserted or force:
-                embed_session(session)
-                stats["new_sessions"] += 1
-                stats["new_messages"] += len(session.messages)
-            else:
-                stats["skipped"] += 1
-
-    return stats
-```
+`index_all(force, report_progress=…)` merges per-source stats; `index_crawler()` remains for single-source sequential use. Progress uses a **global file counter** across sources (`current` / `total` = total files all crawlers).
 
 Use `updated_at` to detect whether a session needs re-embedding (compare file mtime with stored `updated_at`).
 
@@ -302,7 +259,7 @@ Use `updated_at` to detect whether a session needs re-embedding (compare file mt
 In `core/embedder.py`:
 
 - Use `openai.embeddings.create(model="text-embedding-3-small", input=[...])` in batches of 100
-- Fall back to `sentence_transformers.SentenceTransformer("all-MiniLM-L6-v2")` if no OpenAI key is set in `~/.coding-sessions/config.toml` (`[embedding]` → `openai_api_key` or `api_key`)
+- Fall back to `sentence_transformers.SentenceTransformer("all-MiniLM-L6-v2")` if `OPENAI_API_KEY` is not set
 - ChromaDB collection name: `"messages"`
 - Document ID: `message.id`
 - Document text: `message.content`
@@ -346,10 +303,16 @@ In `cli/main.py` using **Typer**. Register as `sess` entrypoint in `pyproject.to
 ### Commands
 
 ```
-sess index [--force]
+sess index [--force] [--summarize-missing]
 ```
-- Runs `index_all()`, shows a Rich progress bar per crawler
-- Prints summary table: sessions indexed, messages embedded, skipped
+- Runs `index_all` (parallel per source); with `--force`, re-embeds even unchanged sessions
+- Shows a Rich `Live` line from `index_progress` (crawler label + global file count); prints summary table
+- `--summarize-missing`: after indexing, backfill AI summaries (requires `OPENAI_API_KEY`)
+
+```
+sess reindex [--summarize-missing]
+```
+- Shortcut for `sess index --force` (full reindex)
 
 ```
 sess list [--tool claude|codex|cursor] [--project PATH] [--days N] [--limit N]
@@ -387,7 +350,15 @@ sess watch
 ```
 sess serve [--port 8000]
 ```
-- Starts FastAPI via uvicorn. Used by the Tauri desktop app.
+- Starts FastAPI via uvicorn (for `sess tui --no-serve` or other API clients).
+
+```
+sess                    # no subcommand → same as sess tui (quick resume)
+sess resume             # explicit alias
+sess tui [--port 8000] [--no-serve]
+```
+- Launches the OpenTUI (`tui/index.ts` via Bun). Default: starts uvicorn on the same port if `/health` is not already up.
+- Requires [Bun](https://bun.sh/) and `bun install` in `tui/`.
 
 ---
 
@@ -406,81 +377,32 @@ POST /index                 → trigger reindex (background task)
 GET  /health                → {"status": "ok"}
 ```
 
-All responses use Pydantic models. Enable CORS for `localhost` (Tauri webview).
+All responses use Pydantic models. Enable CORS for `localhost` / `127.0.0.1` if needed for browser-based tools.
 
 ---
 
-## 10. Desktop App (Tauri v2 + React)
+## 10. Terminal UI (OpenTUI + Bun)
+
+Interactive UI lives in `tui/` using [@opentui/core](https://opentui.com/) (native Zig core, TypeScript API).
 
 ### Setup
 
 ```bash
-cd desktop
-npx create-tauri-app@latest . --template next --manager npm
-npm install
+cd tui
+bun install
 ```
 
-Use **Next.js 14** (App Router) inside Tauri. Tailwind CSS + shadcn/ui.
+### Runtime
 
-### Tauri sidecar config (`src-tauri/tauri.conf.json`)
+- `sess` (default), `sess resume`, and `sess tui` set `SESS_API_BASE` (default `http://127.0.0.1:8000`) and run `bun run index.ts`.
+- The TUI calls the same FastAPI routes as the CLI-backed workflows: `GET /sessions`, `GET /sessions/{id}`, `GET /search`, `GET /health`.
 
-Configure `sess serve` as a sidecar binary that Tauri spawns on startup and kills on exit:
+### UX targets (MVP)
 
-```json
-{
-  "bundle": {
-    "externalBin": ["../../../bin/sess"]
-  },
-  "app": {
-    "withGlobalTauri": true
-  }
-}
-```
-
-In `src-tauri/src/main.rs`, spawn the sidecar on app ready and store the child process handle. Kill it on window close.
-
-### Pages
-
-**`app/page.tsx` — Dashboard**
-- Fetch `GET /stats` and render `<HeatMap />` (one row per tool)
-- Show summary cards: total sessions, total messages, tools active
-- Recent sessions list (last 10)
-
-**`app/sessions/page.tsx` — Session List**
-- Fetch `GET /sessions` with filter params
-- Render `<SessionCard />` grid
-- Filter sidebar: tool checkboxes, date range picker, project search box
-
-**`app/sessions/[id]/page.tsx` — Session Detail**
-- Fetch `GET /sessions/{id}`
-- Render `<MessageViewer />` — message bubbles with Markdown + syntax highlight (use `react-markdown` + `rehype-highlight`)
-- Show session metadata in a side panel (tool, project, date, model)
-
-**`app/search/page.tsx` — Search**
-- Search input with debounce (300ms)
-- Fetch `GET /search?q=`
-- Render `<SearchResult />` cards with snippet highlight and link to session detail
-
-### Components
-
-**`HeatMap.tsx`**
-- Props: `data: { date: string; tool: SourceTool; count: number }[]`
-- Render 52-week grid using `<div>` cells, Tailwind colors per tool
-- Tooltip on hover showing date + count
-
-**`SessionCard.tsx`**
-- Props: `session: Session`
-- Show tool badge (colored), title, project path, message count, relative date
-- Click → navigate to `/sessions/{id}`
-
-**`MessageViewer.tsx`**
-- Props: `messages: Message[]`
-- Alternate bubble layout: user on right, assistant on left
-- `react-markdown` for content, `rehype-highlight` for code blocks
-
-**`SearchResult.tsx`**
-- Props: `result: SearchResult`
-- Show score bar, snippet with query terms bolded, tool badge, project, link to session
+- Session list (`Select`) + semantic search field (`Input` + Enter → `GET /search`)
+- List filters row: **Agent** (`claude` \| `codex` \| `cursor`, empty = all), **Project** (substring → `GET /sessions?project=`), **Days** (max age → `?days=`), Enter applies; semantic hits are client-filtered by agent + project when a query is active
+- Session detail (`ScrollBox` of messages); `b` returns to list (restores filters + search text)
+- Tokyonight-style colors; Ctrl+C exits (renderer `exitOnCtrlC`)
 
 ---
 
@@ -493,7 +415,6 @@ In `src-tauri/src/main.rs`, spawn the sidecar on app ready and store the child p
 provider = "openai"           # "openai" | "local"
 model = "text-embedding-3-small"
 batch_size = 100
-# openai_api_key = "sk-..."   # optional; omit to use local embeddings only
 
 [sources]
 claude = true
@@ -503,9 +424,14 @@ cursor = true
 [server]
 port = 8000
 host = "127.0.0.1"
+
+[summarization]
+enabled = true
+model = "gpt-4o-mini"
+title_ai = false   # true + OPENAI_API_KEY → AI session titles after upsert (still prefixed with project basename when set)
 ```
 
-Read with `tomllib` (stdlib in Python 3.11+). Do not use repo-root `.env` files; secrets stay under `~/.coding-sessions/` only.
+Read with `tomllib` (stdlib in Python 3.11+). Respect `OPENAI_API_KEY` env var. Override `title_ai` with `TITLE_AI_ENABLED=true|false`.
 
 ---
 
@@ -559,7 +485,7 @@ Follow this order exactly:
 10. `cli/display.py` — Rich helpers
 11. `cli/main.py` — all Typer commands
 12. `server/main.py` — FastAPI endpoints
-13. `desktop/` — Tauri + React (scaffold → pages → components)
+13. `tui/` — OpenTUI (`bun install`, `index.ts` → `sess` / `sess tui`)
 
 After each step: run `pyright` (types) and `ruff check` (linting) before moving on.
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from core.crawlers.base import BaseCrawler
 from core.models import Message, MessageRole, Session, SourceTool
+from core.title_utils import finalize_session_title, primary_from_user_messages
+from core.token_stats import apply_session_token_stats
 
 
 def _message_id(session_id: str, index: int) -> str:
@@ -22,10 +25,154 @@ def _parse_time(raw: object) -> datetime | None:
         return None
 
 
+def _flatten_response_content(content: object) -> str:
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        t = item.get("type")
+        if t in ("input_text", "output_text"):
+            tx = item.get("text")
+            if isinstance(tx, str) and tx.strip():
+                parts.append(tx.strip())
+        elif t == "input_image":
+            url = item.get("image_url")
+            if isinstance(url, str) and url.strip():
+                parts.append(f"[image: {url.strip()}]")
+    return "\n".join(parts)
+
+
+def _extract_messages_from_rollout_line(
+    raw: dict[str, object],
+) -> list[tuple[str, str, datetime | None]]:
+    ts = _parse_time(raw.get("timestamp"))
+    top_type = raw.get("type")
+    if not isinstance(top_type, str):
+        return []
+
+    if top_type in {m.value for m in MessageRole}:
+        content = str(raw.get("content") or "").strip()
+        if content:
+            return [(top_type, content, ts)]
+        return []
+
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if top_type == "event_msg":
+        inner = payload.get("type")
+        if inner == "user_message":
+            msg = str(payload.get("message") or "").strip()
+            if msg:
+                return [(MessageRole.USER.value, msg, None)]
+        elif inner == "agent_message":
+            msg = str(payload.get("message") or "").strip()
+            if msg:
+                return [(MessageRole.ASSISTANT.value, msg, None)]
+        return []
+
+    if top_type == "response_item":
+        ptype = payload.get("type")
+        if ptype == "message":
+            role = str(payload.get("role") or "assistant").lower()
+            if role not in {m.value for m in MessageRole}:
+                role = MessageRole.ASSISTANT.value
+            text = _flatten_response_content(payload.get("content")).strip()
+            if text:
+                return [(role, text, None)]
+        if ptype == "function_call":
+            name = str(payload.get("name") or "function_call").strip()
+            args = str(payload.get("arguments") or "").strip()
+            text = f"{name}({args})".strip() if args else name
+            if text:
+                return [(MessageRole.TOOL.value, text, None)]
+        return []
+
+    if top_type == "compacted":
+        msg = str(payload.get("message") or "").strip()
+        if msg:
+            return [(MessageRole.ASSISTANT.value, msg, None)]
+        return []
+
+    return []
+
+
+def _find_session_meta(lines: list[str]) -> tuple[dict[str, object] | None, int | None]:
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "session_meta":
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        return payload, i
+    return None, None
+
+
+def _codex_home_candidates() -> list[Path]:
+    """Roots that mirror Codex's layout: <root>/sessions, <root>/archived_sessions.
+
+    See openai/codex: ``codex_utils_home_dir::find_codex_home`` (``~/.codex`` or
+    ``CODEX_HOME``) and ``codex-rs/core/src/rollout/mod.rs`` (``sessions``,
+    ``archived_sessions`` subdirs).
+    """
+    roots: list[Path] = []
+    roots.append(Path.home() / ".codex")
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    if codex_home:
+        roots.append(Path(codex_home).expanduser())
+    cur = Path.cwd().resolve()
+    for _ in range(128):
+        roots.append(cur / ".codex")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return roots
+
+
+def iter_codex_rollout_directories() -> list[Path]:
+    """Existing rollout directories to scan (``**/*.jsonl``) and to watch."""
+    seen: set[str] = set()
+    out: list[Path] = []
+    for root in _codex_home_candidates():
+        try:
+            resolved = root.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_dir():
+            continue
+        for name in ("sessions", "archived_sessions"):
+            d = resolved / name
+            if not d.is_dir():
+                continue
+            try:
+                key = str(d.resolve())
+            except OSError:
+                key = str(d)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+    return out
+
+
 class CodexCrawler(BaseCrawler):
     def discover(self) -> list[str]:
-        base = Path.home() / ".codex" / "sessions"
-        return [str(p) for p in base.glob("**/*.jsonl")]
+        paths: set[str] = set()
+        for d in iter_codex_rollout_directories():
+            paths.update(str(p) for p in d.glob("**/*.jsonl"))
+        return sorted(paths)
 
     def parse(self, path: str) -> Session | None:
         source_path = Path(path)
@@ -36,15 +183,10 @@ class CodexCrawler(BaseCrawler):
         if not lines:
             return None
 
-        try:
-            session_meta = json.loads(lines[0])
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid session_meta json: {exc}") from exc
+        payload, _meta_idx = _find_session_meta(lines)
+        if payload is None:
+            raise ValueError("no session_meta record found")
 
-        if session_meta.get("type") != "session_meta":
-            raise ValueError("first record is not session_meta")
-
-        payload = session_meta.get("payload") or {}
         session_id = str(payload.get("id") or "")
         if not session_id:
             raise ValueError("session_meta missing payload.id")
@@ -55,31 +197,47 @@ class CodexCrawler(BaseCrawler):
             project_path = None
 
         parsed_messages: list[tuple[str, str, datetime | None]] = []
-        for line in lines[1:]:
+        last_turn_cwd: str | None = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            msg_type = raw.get("type")
-            if not isinstance(msg_type, str) or msg_type not in {m.value for m in MessageRole}:
+            if not isinstance(raw, dict):
                 continue
-            content = str(raw.get("content") or "").strip()
-            if not content:
-                continue
-            parsed_messages.append((str(msg_type), content, _parse_time(raw.get("timestamp"))))
 
-        if not parsed_messages:
-            return None
+            top_type = raw.get("type")
+            if top_type == "turn_context":
+                pl = raw.get("payload")
+                if isinstance(pl, dict):
+                    cwd = pl.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        last_turn_cwd = cwd.strip()
+
+            for role, content, ts in _extract_messages_from_rollout_line(raw):
+                parsed_messages.append((role, content, ts))
+
+        if not project_path and last_turn_cwd:
+            project_path = last_turn_cwd
 
         file_mtime = datetime.fromtimestamp(source_path.stat().st_mtime, tz=UTC)
         if created_time is None:
             created_time = file_mtime
 
-        first_user = next(
-            (content for role, content, _ in parsed_messages if role == MessageRole.USER.value),
-            None,
+        user_texts = [
+            c for role, c, _ in parsed_messages if role == MessageRole.USER.value
+        ]
+        title_primary = primary_from_user_messages(user_texts, fallback=source_path.stem)
+        title = finalize_session_title(
+            primary=title_primary,
+            project_path=project_path,
+            source_path=source_path,
+            created_at=created_time,
         )
-        title = (first_user[:80] if first_user else source_path.stem) or source_path.stem
 
         session = Session(
             id=session_id,
@@ -104,4 +262,5 @@ class CodexCrawler(BaseCrawler):
                 )
             )
 
+        apply_session_token_stats(session, lines)
         return session

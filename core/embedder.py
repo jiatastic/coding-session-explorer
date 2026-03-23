@@ -6,13 +6,25 @@ from typing import Any, Protocol, cast
 
 import chromadb
 
-from core.config import get_embedding_settings, get_openai_api_key
+from core.config import get_embedding_settings
+from core.indexing_lock import writer_lock
 from core.models import Message, SourceTool
+from core.secrets import get_openai_api_key
 
 DATA_DIR = Path.home() / ".coding-sessions"
 CHROMA_DIR = DATA_DIR / "chroma"
 
+# OpenAI embedding inputs are capped at 8192 tokens; clip by chars to stay under that.
+_EMBED_MAX_CHARS = 20_000
+
+
+def _clip_for_embedding(text: str) -> str:
+    if len(text) <= _EMBED_MAX_CHARS:
+        return text
+    return text[: _EMBED_MAX_CHARS - 1].rstrip() + "…"
+
 _openai_client = None
+_openai_client_key: str | None = None
 _local_model = None
 _provider_settings: dict[str, str | int | bool] = {}
 
@@ -21,6 +33,7 @@ class SessionLike(Protocol):
     id: str
     source: SourceTool
     project_path: str | None
+    repo_url: str | None
     messages: list[Message]
 
 
@@ -60,11 +73,12 @@ def _get_openai_embeddings(
     if not api_key:
         return None
 
-    global _openai_client
-    if _openai_client is None:
+    global _openai_client, _openai_client_key
+    if _openai_client is None or _openai_client_key != api_key:
         from openai import OpenAI
 
         _openai_client = OpenAI(api_key=api_key)
+        _openai_client_key = api_key
 
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
@@ -115,6 +129,7 @@ def _prepare_metadata(session: SessionLike) -> Iterable[dict[str, str | None]]:
             "role": message.role.value,
             "source": session.source.value,
             "project_path": session.project_path,
+            "repo_url": session.repo_url,
         }
         for message in session.messages
     ]
@@ -124,13 +139,14 @@ def embed_session(session: SessionLike) -> int:
     if not session.messages:
         return 0
 
-    texts = [message.content for message in session.messages]
+    texts = [_clip_for_embedding(message.content) for message in session.messages]
     vectors = _embed_texts(texts)
-    collection = _collection()
-    collection.upsert(
-        ids=[message.id for message in session.messages],
-        documents=texts,
-        metadatas=list(_prepare_metadata(session)),
-        embeddings=cast(Any, vectors),
-    )
+    with writer_lock:
+        collection = _collection()
+        collection.upsert(
+            ids=[message.id for message in session.messages],
+            documents=texts,
+            metadatas=list(_prepare_metadata(session)),
+            embeddings=cast(Any, vectors),
+        )
     return len(session.messages)

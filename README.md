@@ -2,14 +2,14 @@
 
 > Browse, search, and visualize every AI coding session — Claude Code, Codex CLI, and Cursor — in one place.
 
-No more `codex --sessions` or `cursor --resume` hunting. Every conversation is indexed locally, semantically searchable, and available via CLI or a native desktop app.
+No more `codex --sessions` or `cursor --resume` hunting. Every conversation is indexed locally, semantically searchable, and available via CLI and an optional OpenTUI terminal UI.
 
 ## Features
 
 - **Unified index** — parses sessions from Claude Code, Codex CLI, and Cursor automatically
 - **Semantic search** — `sess search "how did I fix that auth bug"` finds the exact session
 - **CLI-first** — Rich-rendered tables, conversation viewer, ASCII heatmap, all in terminal
-- **Desktop app** — Tauri (native macOS/Windows/Linux) with timeline, heatmap, and full-text viewer
+- **OpenTUI app** — type **`sess`** (no subcommand) or **`sess resume`** / **`sess tui`** to reopen the browser (Bun + `@opentui/core`); list view supports **agent / project / days** filters (same semantics as `sess list --tool --project --days`)
 - **Live indexing** — `sess watch` monitors source directories and indexes new sessions in real time
 - **Project-aware** — sessions grouped by repo path, cross-tool
 
@@ -36,21 +36,28 @@ pip install -e ".[dev]"
 # Run initial index
 sess index
 
-# (Optional) Start the desktop app
-cd desktop && cargo tauri dev
+# (Optional) OpenTUI — install deps once, then reopen anytime with:
+cd tui && bun install && cd ..
+sess              # same as sess tui / sess resume
 ```
+
+Tip: add `alias cse=sess` (or `alias cse='uv run sess'` in the repo) so one short command brings the UI back.
 
 ## CLI Usage
 
 ```bash
-sess index                        # full reindex from all sources
+sess index                        # index new/changed sources only
+sess reindex                      # force full reindex (same as sess index --force)
 sess list                         # list all sessions (Rich table)
 sess list --tool claude --days 7  # filter by tool / recency
 sess view <session-id>            # render conversation in terminal
 sess search "query"               # semantic search across sessions
 sess stats                        # ASCII contribution heatmap
 sess watch                        # background file watcher
-sess serve                        # start FastAPI server (used by desktop app)
+sess serve                        # start FastAPI only (e.g. for `sess tui --no-serve` workflows)
+sess                              # OpenTUI (default — same as sess tui / sess resume)
+sess resume                       # explicit alias for the TUI
+sess tui                          # same; supports --port / --no-serve
 ```
 
 ## Current Verification Status
@@ -62,8 +69,7 @@ sess serve                        # start FastAPI server (used by desktop app)
 - ✅ `ruff check core cli server tests` clean (after auto-format/import/order fixes)
 - ✅ `pyright` clean when run via `uv run pyright` with `uv sync --extra dev` environment
 - ✅ Manual `indexer` and crawler regression scenario now passes with isolated HOME fixture data and does not double-count stale sessions.
-- ✅ `desktop` package install/build/lint passes (`npm run build`, `npm run lint`) after `next.config.ts` migration and ESLint setup.
-- ✅ `cargo` + `tauri-cli` installed and `cargo tauri build` completes successfully (macOS, aarch64), with a placeholder session-sidecar binary present at `bin/sess-aarch64-apple-darwin` for local verification.
+- ✅ `tui/` typechecks with `bun run typecheck` after `bun install`.
 
 ## Architecture
 
@@ -77,18 +83,17 @@ sess serve                        # start FastAPI server (used by desktop app)
      chroma/       ← ChromaDB (vector embeddings)
         ↙                    ↘
  CLI (sess)            server/ FastAPI
- Typer + Rich          (Tauri sidecar)
+ Typer + Rich          JSON API
                               ↓
-                       desktop/ Tauri
-                       React + shadcn/ui
+                       tui/ OpenTUI (Bun)
 ```
 
 ## Stack
 
 - **Core / CLI**: Python 3.12, Typer, Rich, SQLModel, ChromaDB, watchdog
-- **Embeddings**: OpenAI `text-embedding-3-small` when `openai_api_key` is set in `~/.coding-sessions/config.toml`; otherwise local `sentence-transformers` (fully offline)
+- **Embeddings**: OpenAI `text-embedding-3-small` (swap in `sentence-transformers` for fully offline)
 - **Server**: FastAPI + Uvicorn
-- **Desktop**: Tauri v2 (Rust) + React 18 + Tailwind CSS + shadcn/ui
+- **TUI**: Bun + [@opentui/core](https://opentui.com/) (Zig-backed terminal UI)
 
 ## Contributing
 

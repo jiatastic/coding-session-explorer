@@ -22,7 +22,7 @@ class SessionEventHandler(FileSystemEventHandler):
 
     def _emit(self, event: FileSystemEvent) -> None:
         path = Path(str(event.src_path))
-        if path.suffix not in {".jsonl", ".db"}:
+        if path.suffix not in {".jsonl", ".json", ".db", ".md", ".txt"}:
             return
         self.callback(str(path))
 

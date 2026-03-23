@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
-from sqlmodel import Field, SQLModel, create_engine, select
+from sqlmodel import Field, SQLModel, col, create_engine, select
 from sqlmodel import Session as SQLSession
 
+from core.indexing_lock import writer_lock
 from core.models import Message, MessageRole, Session, SourceTool
 
 _ENGINE = None
@@ -29,11 +30,18 @@ class SessionRow(SQLModel, table=True):
     id: str = Field(primary_key=True)
     source: str
     project_path: str | None = None
+    repo_url: str | None = Field(default=None)
     title: str
     created_at: datetime
     updated_at: datetime
     message_count: int
     raw_path: str
+    summary: str | None = Field(default=None)
+    tokens_input: int | None = Field(default=None)
+    tokens_output: int | None = Field(default=None)
+    tokens_total: int | None = Field(default=None)
+    tokens_context_window: int | None = Field(default=None)
+    tokens_estimated: bool = Field(default=False)
 
 
 class MessageRow(SQLModel, table=True):
@@ -58,13 +66,58 @@ def get_engine() -> Engine:
             connect_args={"check_same_thread": False},
         )
         _ENGINE_PATH = str(db_path)
+
+        @event.listens_for(_ENGINE, "connect")
+        def _sqlite_wal(dbapi_connection: Any, _record: Any) -> None:  # noqa: ANN401
+            cur = dbapi_connection.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.close()
+
     return _ENGINE
 
 
 def init_db() -> None:
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
+    _ensure_session_summary_column(engine)
+    _ensure_session_repo_url_column(engine)
+    _ensure_session_token_columns(engine)
     _ensure_fts(engine)
+
+
+def _ensure_session_summary_column(engine: Engine) -> None:
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(sessionrow)")).fetchall()
+        columns = {row[1] for row in rows}
+        if "summary" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN summary TEXT"))
+
+
+def _ensure_session_repo_url_column(engine: Engine) -> None:
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(sessionrow)")).fetchall()
+        columns = {row[1] for row in rows}
+        if "repo_url" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN repo_url TEXT"))
+
+
+def _ensure_session_token_columns(engine: Engine) -> None:
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(sessionrow)")).fetchall()
+        columns = {row[1] for row in rows}
+        if "tokens_input" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN tokens_input INTEGER"))
+        if "tokens_output" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN tokens_output INTEGER"))
+        if "tokens_total" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN tokens_total INTEGER"))
+        if "tokens_context_window" not in columns:
+            conn.execute(text("ALTER TABLE sessionrow ADD COLUMN tokens_context_window INTEGER"))
+        if "tokens_estimated" not in columns:
+            conn.execute(
+                text("ALTER TABLE sessionrow ADD COLUMN tokens_estimated INTEGER DEFAULT 0")
+            )
 
 
 def _ensure_fts(engine) -> None:
@@ -130,15 +183,23 @@ def session_scope() -> Iterator[SQLSession]:
 
 
 def _row_to_session_model(row: SessionRow) -> Session:
+    te = getattr(row, "tokens_estimated", None)
     return Session(
         id=row.id,
         source=SourceTool(row.source),
         project_path=row.project_path,
+        repo_url=getattr(row, "repo_url", None),
         title=row.title,
         created_at=row.created_at,
         updated_at=row.updated_at,
         message_count=row.message_count,
         raw_path=row.raw_path,
+        summary=row.summary,
+        tokens_input=getattr(row, "tokens_input", None),
+        tokens_output=getattr(row, "tokens_output", None),
+        tokens_total=getattr(row, "tokens_total", None),
+        tokens_context_window=getattr(row, "tokens_context_window", None),
+        tokens_estimated=bool(te) if te is not None else False,
         messages=[],
     )
 
@@ -161,6 +222,11 @@ def _row_to_message_model(row: MessageRow) -> Message:
 
 
 def upsert_session(session: Session) -> bool:
+    with writer_lock:
+        return _upsert_session_unlocked(session)
+
+
+def _upsert_session_unlocked(session: Session) -> bool:
     with session_scope() as db:
         existing = db.get(SessionRow, session.id)
 
@@ -171,7 +237,15 @@ def upsert_session(session: Session) -> bool:
                 existing_updated >= session_updated
                 and existing.message_count == session.message_count
                 and existing.project_path == session.project_path
+                and existing.repo_url == session.repo_url
                 and existing.title == session.title
+                and getattr(existing, "tokens_input", None) == session.tokens_input
+                and getattr(existing, "tokens_output", None) == session.tokens_output
+                and getattr(existing, "tokens_total", None) == session.tokens_total
+                and getattr(existing, "tokens_context_window", None)
+                == session.tokens_context_window
+                and bool(getattr(existing, "tokens_estimated", False))
+                == session.tokens_estimated
             ):
                 return False
 
@@ -181,21 +255,34 @@ def upsert_session(session: Session) -> bool:
                     id=session.id,
                     source=session.source.value,
                     project_path=session.project_path,
+                    repo_url=session.repo_url,
                     title=session.title,
                     created_at=session.created_at,
                     updated_at=session.updated_at,
                     message_count=session.message_count,
                     raw_path=session.raw_path,
+                    tokens_input=session.tokens_input,
+                    tokens_output=session.tokens_output,
+                    tokens_total=session.tokens_total,
+                    tokens_context_window=session.tokens_context_window,
+                    tokens_estimated=session.tokens_estimated,
                 )
             )
         else:
             existing.source = session.source.value
             existing.project_path = session.project_path
+            existing.repo_url = session.repo_url
             existing.title = session.title
             existing.created_at = session.created_at
             existing.updated_at = session.updated_at
             existing.message_count = session.message_count
             existing.raw_path = session.raw_path
+            existing.summary = None
+            existing.tokens_input = session.tokens_input
+            existing.tokens_output = session.tokens_output
+            existing.tokens_total = session.tokens_total
+            existing.tokens_context_window = session.tokens_context_window
+            existing.tokens_estimated = session.tokens_estimated
             db.add(existing)
 
             db.execute(text("DELETE FROM messagerow WHERE session_id = :sid"), {"sid": session.id})
@@ -217,6 +304,40 @@ def upsert_session(session: Session) -> bool:
 
         db.commit()
         return True
+
+
+def update_session_summary(session_id: str, summary: str) -> None:
+    with writer_lock:
+        with session_scope() as db:
+            row = db.get(SessionRow, session_id)
+            if row is None:
+                return
+            row.summary = summary
+            db.add(row)
+            db.commit()
+
+
+def update_session_title(session_id: str, title: str) -> None:
+    with writer_lock:
+        with session_scope() as db:
+            row = db.get(SessionRow, session_id)
+            if row is None:
+                return
+            row.title = title
+            db.add(row)
+            db.commit()
+
+
+def list_session_ids_missing_summary(limit: int = 500) -> list[str]:
+    with session_scope() as db:
+        statement = (
+            select(SessionRow.id)
+            .where(col(SessionRow.summary).is_(None))
+            .where(SessionRow.message_count > 0)
+            .limit(limit)
+        )
+        rows = db.exec(statement).all()
+    return list(rows)
 
 
 def list_sessions(

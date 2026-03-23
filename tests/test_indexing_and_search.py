@@ -8,6 +8,7 @@ from typing import Any
 
 from core import db
 from core import search as search_module
+from core.crawlers import cursor as cursor_crawler
 from core.indexer import index_all
 from core.models import SourceTool
 
@@ -36,6 +37,18 @@ def _seed_data(home: str) -> None:
     cursor = os.path.join(base, ".cursor", "chats", "hash", "store.db")
     cursor_dir = os.path.dirname(cursor)
     os.makedirs(cursor_dir, exist_ok=True)
+
+    proj_dir = Path(base) / "cursor-ws-proj"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    ws_file = (
+        cursor_crawler._cursor_user_data_root() / "workspaceStorage" / "hash" / "workspace.json"
+    )
+    ws_file.parent.mkdir(parents=True, exist_ok=True)
+    ws_file.write_text(
+        json.dumps({"folder": proj_dir.resolve().as_uri()}),
+        encoding="utf-8",
+    )
+
     conn = sqlite3.connect(cursor)
     try:
         conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
@@ -74,7 +87,9 @@ def _copy_fixture(source: Path, destination: str) -> None:
 
 def test_end_to_end_indexing_and_fulltext_search(monkeypatch: Any, tmp_path: Path) -> None:
     _with_fake_home(monkeypatch, tmp_path)
-    _seed_data(tmp_path / "home")
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _seed_data(os.environ["HOME"])
 
     monkeypatch.setattr("core.indexer.embed_session", lambda _: 0)
 

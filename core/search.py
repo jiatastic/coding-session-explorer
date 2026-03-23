@@ -54,6 +54,7 @@ def semantic_search(query: str, n_results: int = 10) -> list[SearchResult]:
                 session_title=session.title,
                 source=session.source,
                 project_path=session.project_path,
+                repo_url=session.repo_url,
                 snippet=_truncate(docs[idx] if docs else ""),
                 score=score,
             )
@@ -77,7 +78,8 @@ def fulltext_search(query: str, n_results: int = 10) -> list[SearchResult]:
                        fts.rowid AS rowid,
                         s.title AS title,
                         s.source AS source,
-                        s.project_path AS project_path
+                        s.project_path AS project_path,
+                        s.repo_url AS repo_url
                  FROM messages_fts fts
                  JOIN messagerow m ON m.rowid = fts.rowid
                  JOIN sessionrow s ON s.id = m.session_id
@@ -101,6 +103,7 @@ def fulltext_search(query: str, n_results: int = 10) -> list[SearchResult]:
                 session_title=row.title,
                 source=source,
                 project_path=row.project_path,
+                repo_url=getattr(row, "repo_url", None),
                 snippet=_truncate(row.content or ""),
                 score=1.0,
             )

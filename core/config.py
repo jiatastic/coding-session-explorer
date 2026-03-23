@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8000,
+        "strict_port": False,
+    },
+    "summarization": {
+        "enabled": True,
+        "model": "gpt-4o-mini",
+        "title_ai": False,
     },
 }
 
@@ -65,23 +72,42 @@ def load_config() -> dict[str, Any]:
     return config
 
 
-def get_openai_api_key() -> str | None:
-    """Read optional API key from ~/.coding-sessions/config.toml (not from repo .env files)."""
-    emb = load_config().get("embedding", {})
-    if not isinstance(emb, dict):
-        return None
-    for key in ("openai_api_key", "api_key"):
-        raw = emb.get(key)
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-    return None
+def get_summarization_settings() -> dict[str, Any]:
+    config = load_config()
+    section = config.get("summarization", {})
+    raw_enabled = os.getenv("SUMMARIZATION_ENABLED", str(section.get("enabled", True))).lower()
+    enabled = raw_enabled not in ("0", "false", "no", "off")
+    model = os.getenv("SUMMARIZATION_MODEL") or str(section.get("model", "gpt-4o-mini"))
+    title_ai = bool(section.get("title_ai", False))
+    env_title = os.getenv("TITLE_AI_ENABLED", "").strip().lower()
+    if env_title in ("1", "true", "yes", "on"):
+        title_ai = True
+    if env_title in ("0", "false", "no", "off"):
+        title_ai = False
+    return {"enabled": enabled, "model": model, "title_ai": title_ai}
+
+
+def get_server_settings() -> dict[str, Any]:
+    config = load_config()
+    section = config.get("server", {})
+    strict = bool(section.get("strict_port", False))
+    env_strict = os.getenv("SESS_TUI_STRICT_PORT", "").strip().lower()
+    if env_strict in ("1", "true", "yes", "on"):
+        strict = True
+    if env_strict in ("0", "false", "no", "off"):
+        strict = False
+    try:
+        port = int(section.get("port", 8000))
+    except (TypeError, ValueError):
+        port = 8000
+    return {"host": str(section.get("host", "127.0.0.1")), "port": port, "strict_port": strict}
 
 
 def get_embedding_settings() -> dict[str, Any]:
     config = load_config()
     settings = config.get("embedding", {})
-    provider = str(settings.get("provider", "openai"))
-    model = str(settings.get("model", "text-embedding-3-small"))
+    provider = os.getenv("EMBEDDING_PROVIDER") or str(settings.get("provider", "openai"))
+    model = os.getenv("EMBEDDING_MODEL") or str(settings.get("model", "text-embedding-3-small"))
     try:
         batch_size = int(settings.get("batch_size", 100))
     except (TypeError, ValueError):
