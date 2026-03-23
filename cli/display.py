@@ -74,6 +74,36 @@ def render_message_view(session: Session) -> None:
     console = Console()
     console.rule(f"[bold]{session.title}[/bold] · [dim]{session.id}[/dim]")
 
+    if session.tokens_total is not None:
+        est = " (estimated ~4 chars/token)" if session.tokens_estimated else ""
+        parts = [
+            f"input {session.tokens_input}",
+            f"output {session.tokens_output}",
+            f"total {session.tokens_total}",
+        ]
+        if session.tokens_context_window is not None:
+            pct = min(
+                100.0,
+                (session.tokens_total / session.tokens_context_window) * 100,
+            )
+            parts.append(f"context {session.tokens_context_window} (~{pct:.1f}% used)")
+        console.print(
+            Panel(
+                " · ".join(str(p) for p in parts) + est,
+                title="[bold]Tokens[/bold]",
+                border_style="dim",
+            )
+        )
+
+    if session.summary:
+        console.print(
+            Panel(
+                session.summary,
+                title="[bold]AI summary[/bold]",
+                border_style="dim",
+            )
+        )
+
     for message in session.messages:
         border = {
             "user": "cyan",

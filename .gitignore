@@ -20,12 +20,7 @@ venv/
 node_modules/
 .next/
 out/
-desktop/.next/
-desktop/node_modules/
-
-# Tauri / Rust
-desktop/src-tauri/target/
-desktop/src-tauri/WixTools/
+tui/node_modules/
 
 # macOS
 .DS_Store

@@ -22,6 +22,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8000,
+        "strict_port": False,
+    },
+    "summarization": {
+        "enabled": True,
+        "model": "gpt-4o-mini",
+        "title_ai": False,
     },
 }
 
@@ -64,6 +70,37 @@ def load_config() -> dict[str, Any]:
             config[section] = value
 
     return config
+
+
+def get_summarization_settings() -> dict[str, Any]:
+    config = load_config()
+    section = config.get("summarization", {})
+    raw_enabled = os.getenv("SUMMARIZATION_ENABLED", str(section.get("enabled", True))).lower()
+    enabled = raw_enabled not in ("0", "false", "no", "off")
+    model = os.getenv("SUMMARIZATION_MODEL") or str(section.get("model", "gpt-4o-mini"))
+    title_ai = bool(section.get("title_ai", False))
+    env_title = os.getenv("TITLE_AI_ENABLED", "").strip().lower()
+    if env_title in ("1", "true", "yes", "on"):
+        title_ai = True
+    if env_title in ("0", "false", "no", "off"):
+        title_ai = False
+    return {"enabled": enabled, "model": model, "title_ai": title_ai}
+
+
+def get_server_settings() -> dict[str, Any]:
+    config = load_config()
+    section = config.get("server", {})
+    strict = bool(section.get("strict_port", False))
+    env_strict = os.getenv("SESS_TUI_STRICT_PORT", "").strip().lower()
+    if env_strict in ("1", "true", "yes", "on"):
+        strict = True
+    if env_strict in ("0", "false", "no", "off"):
+        strict = False
+    try:
+        port = int(section.get("port", 8000))
+    except (TypeError, ValueError):
+        port = 8000
+    return {"host": str(section.get("host", "127.0.0.1")), "port": port, "strict_port": strict}
 
 
 def get_embedding_settings() -> dict[str, Any]:
