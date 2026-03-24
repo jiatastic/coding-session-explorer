@@ -21,15 +21,15 @@ dependencies = [
 dev = ["pytest", "ruff", "pyright"]
 
 [project.scripts]
-sess = "cli.main:app"
+sess = "sess_launcher:main"
 
 [build-system]
 requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["core*", "cli*", "server*"]
+[tool.setuptools]
+py-modules = ["sess_launcher"]
+packages = ["cli", "core", "server"]
 
 [tool.ruff]
 line-length = 100
