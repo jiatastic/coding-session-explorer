@@ -118,9 +118,11 @@ def get_stats(year: int | None = None):
     return filtered
 
 
-def _background_index() -> None:
+def _background_index(recent_days: int | None = None) -> None:
     try:
-        stats = index_all(force=True, report_progress=True)
+        stats = index_all(
+            force=True, report_progress=True, recent_days=recent_days
+        )
         index_progress.finish(stats)
     except Exception as exc:  # noqa: BLE001
         index_progress.fail(str(exc))
@@ -132,10 +134,18 @@ def index_status() -> dict:
 
 
 @app.post("/index")
-def trigger_index(background_tasks: BackgroundTasks) -> dict[str, str]:
+def trigger_index(
+    background_tasks: BackgroundTasks,
+    recent_days: int | None = Query(
+        default=None,
+        ge=1,
+        le=36500,
+        description="Only embed + AI for sessions updated in the last N days.",
+    ),
+) -> dict[str, str]:
     db.init_db()
     if index_progress.is_running():
         raise HTTPException(status_code=409, detail="index already running")
     index_progress.reset_running()
-    background_tasks.add_task(_background_index)
+    background_tasks.add_task(_background_index, recent_days)
     return {"status": "queued"}

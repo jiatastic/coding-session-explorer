@@ -51,7 +51,10 @@ def _bootstrap_env() -> None:
 _bootstrap_env()
 
 app = typer.Typer(
-    help="Session explorer — run `sess` with no args to open the TUI (same as `sess tui`).",
+    help=(
+        "Session explorer — bare `sess` opens the TUI when Bun + OpenTUI are installed; "
+        "otherwise prints the session list (same as `sess list`)."
+    ),
     invoke_without_command=True,
 )
 console = Console()
@@ -78,7 +81,10 @@ def _default_command(
         settings = get_server_settings()
         api_port = port if port is not None else settings["port"]
         strict = strict_port or settings["strict_port"]
-        _run_tui(port=api_port, no_serve=False, strict_port=strict)
+        if _tui_ready():
+            _run_tui(port=api_port, no_serve=False, strict_port=strict)
+        else:
+            _run_default_without_tui()
 
 
 def _resolve_tool(tool: str | None) -> SourceTool | None:
@@ -103,7 +109,12 @@ def _find_session_by_prefix(value: str) -> str | None:
     return None
 
 
-def _run_index(*, force: bool, summarize_missing: bool) -> None:
+def _run_index(
+    *,
+    force: bool,
+    summarize_missing: bool,
+    recent_days: int | None,
+) -> None:
     embedding_settings = get_embedding_settings()
     set_provider(embedding_settings)
 
@@ -115,7 +126,9 @@ def _run_index(*, force: bool, summarize_missing: bool) -> None:
 
     def _index_worker() -> None:
         try:
-            result["aggregate"] = index_all(force=force, report_progress=True)
+            result["aggregate"] = index_all(
+                force=force, report_progress=True, recent_days=recent_days
+            )
         except BaseException as exc:
             thread_error.append(exc)
 
@@ -157,12 +170,15 @@ def _run_index(*, force: bool, summarize_missing: bool) -> None:
 
     console.print(
         display.render_summary(
-            aggregate["new_sessions"], aggregate["new_messages"], aggregate["skipped"]
+            aggregate["new_sessions"],
+            aggregate["new_messages"],
+            aggregate["skipped"],
+            skipped_heavy=int(aggregate.get("skipped_heavy", 0)),
         )
     )
 
     if summarize_missing:
-        filled = summarize_missing_sessions(limit=500)
+        filled = summarize_missing_sessions(limit=500, recent_days=recent_days)
         console.print(f"[cyan]Summaries written:[/cyan] {filled} session(s)")
 
 
@@ -178,8 +194,15 @@ def index(
         "--summarize-missing",
         help="After indexing, backfill AI summaries where missing (requires OPENAI_API_KEY)",
     ),
+    recent_days: int | None = typer.Option(
+        None,
+        "--recent-days",
+        min=1,
+        help="Only embed + AI (summary/title) for sessions updated in the last N days; "
+        "DB rows are still updated for all sources.",
+    ),
 ) -> None:
-    _run_index(force=force, summarize_missing=summarize_missing)
+    _run_index(force=force, summarize_missing=summarize_missing, recent_days=recent_days)
 
 
 @app.command()
@@ -189,9 +212,65 @@ def reindex(
         "--summarize-missing",
         help="After reindexing, backfill AI summaries where missing (requires OPENAI_API_KEY)",
     ),
+    recent_days: int | None = typer.Option(
+        None,
+        "--recent-days",
+        min=1,
+        help="Only embed + AI for sessions updated in the last N days (see `sess index --help`).",
+    ),
 ) -> None:
     """Reindex all sources with --force (same as `sess index --force`)."""
-    _run_index(force=True, summarize_missing=summarize_missing)
+    _run_index(force=True, summarize_missing=summarize_missing, recent_days=recent_days)
+
+
+@app.command()
+def reset(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation (required for scripts).",
+    ),
+    all_data: bool = typer.Option(
+        False,
+        "--all",
+        help="Delete the entire ~/.coding-sessions directory (config.toml, secrets.json, everything).",
+    ),
+    reindex_after: bool = typer.Option(
+        False,
+        "--reindex",
+        help="Run a full index immediately after reset.",
+    ),
+) -> None:
+    """Remove local SQLite index and Chroma vectors; optional full data wipe and reindex."""
+    root = db.get_data_root()
+    if not yes:
+        if all_data:
+            ok = typer.confirm(
+                f"Delete ALL app data under {root} (including config and saved API keys)?",
+                default=False,
+            )
+        else:
+            ok = typer.confirm(
+                "Remove sessions.db and chroma/ only (keep config.toml and secrets.json)?",
+                default=False,
+            )
+        if not ok:
+            raise typer.Abort()
+
+    db.invalidate_engine()
+    removed = db.reset_index_storage(remove_entire_data_dir=all_data)
+    if removed:
+        for line in removed:
+            console.print(f"[dim]removed[/dim] {line}")
+    else:
+        console.print("[yellow]Nothing to remove (paths were already absent).[/yellow]")
+
+    if reindex_after:
+        console.print("[cyan]Reindexing…[/cyan]")
+        _run_index(force=True, summarize_missing=False, recent_days=None)
+    else:
+        console.print("[dim]Run[/dim] [bold]sess index[/bold] [dim]when you want a fresh index.[/dim]")
 
 
 @app.command()
@@ -354,6 +433,26 @@ def _first_free_port(host: str, start: int, *, span: int = 32) -> int | None:
         if _can_bind_tcp(host, p):
             return p
     return None
+
+
+def _tui_ready() -> bool:
+    root = _repo_root()
+    opentui = root / "tui" / "node_modules" / "@opentui" / "core"
+    return opentui.is_dir() and shutil.which("bun") is not None
+
+
+def _run_default_without_tui() -> None:
+    db.init_db()
+    sessions = db.list_sessions(limit=100)
+    if not sessions:
+        console.print("[yellow]No sessions found.[/yellow]")
+        console.print("[dim]Run[/dim] [bold]sess index[/bold] [dim]to import history.[/dim]")
+    else:
+        console.print(display.render_session_table(sessions))
+    console.print(
+        "[dim]OpenTUI browser:[/dim] [bold]cd tui && bun install[/bold] [dim]then[/dim] [bold]sess tui[/bold][dim]. "
+        "More:[/dim] [bold]sess --help[/bold][dim].[/dim]"
+    )
 
 
 def _run_tui(*, port: int, no_serve: bool, strict_port: bool = False) -> None:

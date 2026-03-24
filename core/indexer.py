@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime, timedelta
 
 from core import db
 from core.config import get_embedding_settings, load_config
@@ -10,6 +11,15 @@ from core.embedder import embed_session, set_provider
 from core.git_remote import origin_https_url
 from core.summarizer import maybe_summarize_session
 from core.title_ai import maybe_ai_session_title
+
+
+def session_in_embedding_window(updated_at: datetime, recent_days: int | None) -> bool:
+    """If ``recent_days`` is set, only sessions with ``updated_at`` in the last N days get embed/AI."""
+    if recent_days is None:
+        return True
+    ts = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=UTC)
+    cutoff = datetime.now(tz=UTC) - timedelta(days=recent_days)
+    return ts >= cutoff
 
 
 def _crawler_progress_label(crawler: BaseCrawler) -> str:
@@ -23,8 +33,14 @@ def _crawler_progress_label(crawler: BaseCrawler) -> str:
     return name
 
 
-def _index_one_path(crawler: BaseCrawler, path: str, force: bool) -> dict[str, int]:
-    stats = {"new_sessions": 0, "new_messages": 0, "skipped": 0}
+def _index_one_path(
+    crawler: BaseCrawler,
+    path: str,
+    force: bool,
+    *,
+    recent_days: int | None = None,
+) -> dict[str, int]:
+    stats = {"new_sessions": 0, "new_messages": 0, "skipped": 0, "skipped_heavy": 0}
     try:
         session = crawler.parse(path)
     except Exception as exc:  # noqa: BLE001
@@ -35,12 +51,15 @@ def _index_one_path(crawler: BaseCrawler, path: str, force: bool) -> dict[str, i
     session.repo_url = origin_https_url(session.project_path)
     upserted = db.upsert_session(session)
     if upserted or force:
-        embed_session(session)
-        if upserted:
-            maybe_summarize_session(session.id)
-            maybe_ai_session_title(session.id)
+        if session_in_embedding_window(session.updated_at, recent_days):
+            embed_session(session)
+            stats["new_messages"] += len(session.messages)
+            if upserted:
+                maybe_summarize_session(session.id)
+                maybe_ai_session_title(session.id)
+        else:
+            stats["skipped_heavy"] += 1
         stats["new_sessions"] += 1
-        stats["new_messages"] += len(session.messages)
     else:
         stats["skipped"] += 1
     return stats
@@ -52,10 +71,11 @@ def index_crawler(
     *,
     report_progress: bool = False,
     progress_label: str = "",
+    recent_days: int | None = None,
 ) -> dict[str, int]:
     from core import index_progress
 
-    stats = {"new_sessions": 0, "new_messages": 0, "skipped": 0}
+    stats = {"new_sessions": 0, "new_messages": 0, "skipped": 0, "skipped_heavy": 0}
     paths = crawler.discover()
     label = progress_label or type(crawler).__name__
     if report_progress:
@@ -66,17 +86,23 @@ def index_crawler(
     for i, path in enumerate(paths):
         if report_progress:
             index_progress.update(crawler=label, current=i + 1, total=len(paths), detail=path)
-        frag = _index_one_path(crawler, path, force)
+        frag = _index_one_path(crawler, path, force, recent_days=recent_days)
         for key in stats:
             stats[key] += frag[key]
     return stats
 
 
 def _merge_stats(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
-    return {k: a[k] + b[k] for k in a}
+    keys = set(a) | set(b)
+    return {k: a.get(k, 0) + b.get(k, 0) for k in keys}
 
 
-def index_all(force: bool = False, *, report_progress: bool = False) -> dict[str, int]:
+def index_all(
+    force: bool = False,
+    *,
+    report_progress: bool = False,
+    recent_days: int | None = None,
+) -> dict[str, int]:
     config = load_config()
     db.init_db()
     settings = get_embedding_settings()
@@ -85,6 +111,7 @@ def index_all(force: bool = False, *, report_progress: bool = False) -> dict[str
         "new_sessions": 0,
         "new_messages": 0,
         "skipped": 0,
+        "skipped_heavy": 0,
     }
 
     source_config = config.get("sources", {})
@@ -140,10 +167,10 @@ def index_all(force: bool = False, *, report_progress: bool = False) -> dict[str
 
     def run_worker(item: tuple[BaseCrawler, list[str], str]) -> dict[str, int]:
         crawler, paths, label = item
-        local = {"new_sessions": 0, "new_messages": 0, "skipped": 0}
+        local = {"new_sessions": 0, "new_messages": 0, "skipped": 0, "skipped_heavy": 0}
         for path in paths:
             bump_progress(label, path)
-            frag = _index_one_path(crawler, path, force)
+            frag = _index_one_path(crawler, path, force, recent_days=recent_days)
             for key in local:
                 local[key] += frag[key]
         return local

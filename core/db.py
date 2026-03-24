@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,8 +21,13 @@ _ENGINE = None
 _ENGINE_PATH: str | None = None
 
 
+def _data_root() -> Path:
+    """~/.coding-sessions without creating the directory."""
+    return Path.home() / ".coding-sessions"
+
+
 def _db_path() -> Path:
-    base_dir = Path.home() / ".coding-sessions"
+    base_dir = _data_root()
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / "sessions.db"
 
@@ -328,14 +334,21 @@ def update_session_title(session_id: str, title: str) -> None:
             db.commit()
 
 
-def list_session_ids_missing_summary(limit: int = 500) -> list[str]:
+def list_session_ids_missing_summary(
+    limit: int = 500,
+    *,
+    recent_days: int | None = None,
+) -> list[str]:
     with session_scope() as db:
         statement = (
             select(SessionRow.id)
             .where(col(SessionRow.summary).is_(None))
             .where(SessionRow.message_count > 0)
-            .limit(limit)
         )
+        if recent_days is not None:
+            cutoff = datetime.now(tz=UTC) - timedelta(days=recent_days)
+            statement = statement.where(cast(Any, SessionRow.updated_at) >= cutoff)
+        statement = statement.limit(limit)
         rows = db.exec(statement).all()
     return list(rows)
 
@@ -466,3 +479,63 @@ def get_summary() -> tuple[int, int, list[SourceTool]]:
 
 def get_db_path() -> Path:
     return _db_path()
+
+
+def get_data_root() -> Path:
+    """Return ~/.coding-sessions without creating it."""
+    return _data_root()
+
+
+def invalidate_engine() -> None:
+    """Close and forget the SQLite engine (e.g. before deleting the DB file)."""
+    global _ENGINE
+    global _ENGINE_PATH
+    if _ENGINE is not None:
+        try:
+            _ENGINE.dispose()
+        except Exception:
+            pass
+    _ENGINE = None
+    _ENGINE_PATH = None
+
+
+def chroma_dir_path() -> Path:
+    return _data_root() / "chroma"
+
+
+def reset_index_storage(*, remove_entire_data_dir: bool = False) -> list[str]:
+    """
+    Delete local index data under ~/.coding-sessions/.
+
+    If remove_entire_data_dir is False: remove sessions.db (+ WAL/SHM/journal) and chroma/ only.
+    If True: remove the whole data directory (config, secrets, everything).
+
+    Caller should call invalidate_engine() first if the DB may be open in-process.
+
+    Returns a list of human-readable paths removed (for logging).
+    """
+    data_root = _data_root()
+    removed: list[str] = []
+
+    if remove_entire_data_dir:
+        if data_root.exists():
+            shutil.rmtree(data_root)
+            removed.append(str(data_root))
+        return removed
+
+    db_file = data_root / "sessions.db"
+    for extra in ("-wal", "-shm", "-journal"):
+        side = Path(f"{db_file}{extra}")
+        if side.is_file() or side.is_symlink():
+            side.unlink(missing_ok=True)
+            removed.append(str(side))
+    if db_file.is_file() or db_file.is_symlink():
+        db_file.unlink(missing_ok=True)
+        removed.append(str(db_file))
+
+    chroma = chroma_dir_path()
+    if chroma.is_dir():
+        shutil.rmtree(chroma)
+        removed.append(str(chroma))
+
+    return removed

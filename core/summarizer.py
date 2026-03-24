@@ -86,9 +86,13 @@ def maybe_summarize_session(session_id: str) -> bool:
     return True
 
 
-def summarize_missing_sessions(limit: int = 500) -> int:
+def summarize_missing_sessions(
+    limit: int = 500,
+    *,
+    recent_days: int | None = None,
+) -> int:
     """Backfill summaries for rows with NULL summary and message_count > 0."""
-    ids = db.list_session_ids_missing_summary(limit=limit)
+    ids = db.list_session_ids_missing_summary(limit=limit, recent_days=recent_days)
     done = 0
     for sid in ids:
         if maybe_summarize_session(sid):

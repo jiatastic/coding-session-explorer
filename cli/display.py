@@ -60,13 +60,21 @@ def render_session_table(sessions: list[Session]) -> Table:
     return table
 
 
-def render_summary(total_sessions: int, total_messages: int, skipped: int) -> Table:
+def render_summary(
+    total_sessions: int,
+    total_messages: int,
+    skipped: int,
+    *,
+    skipped_heavy: int = 0,
+) -> Table:
     table = Table(show_header=False, box=box.ROUNDED)
     table.add_column("Metric")
     table.add_column("Count", justify="right")
     table.add_row("sessions indexed", str(total_sessions))
     table.add_row("messages embedded", str(total_messages))
     table.add_row("skipped", str(skipped))
+    if skipped_heavy:
+        table.add_row("embed/AI skipped (outside --recent-days)", str(skipped_heavy))
     return table
 
 
